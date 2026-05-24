@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kinechain"
+version = "0.0.1"
+description = "Infer kinematic chains from 3D assemblies (STEP) without explicit mating information."
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "kinechain contributors" }]
+dependencies = [
+    "cadquery-ocp >= 7.8, < 8",
+    "numpy >= 1.26",
+    "networkx >= 3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "cadquery >= 2.4",
+    "pytest >= 8.0",
+]
+sim = [
+    "mujoco >= 3.0",
+]
+
+[project.scripts]
+kinechain = "kinechain.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
