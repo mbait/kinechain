@@ -13,7 +13,7 @@ source .venv/bin/activate        # venv at repo root; package installed editable
 pip install -e ".[dev]"          # install with dev deps (cadquery, pytest)
 pytest                           # run all tests
 pytest tests/test_hinge.py::test_pipeline_yields_one_revolute  # single test
-kinechain assembly.step --out model.xml [--root PartName]      # CLI
+kinechain assembly.step --out model.xml [--format mjcf|sdf] [--root PartName]  # CLI
 ```
 
 The MuJoCo round-trip test (`test_mjcf_loads_in_mujoco`) auto-skips unless `mujoco` is installed (`pip install -e ".[sim]"`). CI (`.github/workflows/ci.yml`) runs `pytest -v` on Python 3.11 and 3.12.
@@ -34,12 +34,15 @@ joints.classify_all      rule-based pattern matching on contact features → Joi
 graph.build_tree         joints → KinematicTree (BFS spanning tree from a root;
                          non-tree edges become loop_joints for cycle closure)
 export_mjcf.write_mjcf   KinematicTree → MJCF XML + per-part binary STL meshes
+export_sdf.write_sdf     KinematicTree → SDF XML (same IR and meshes; helpers
+                         shared via export_common.py)
 ```
 
 Key design points that span modules:
 
 - **OCCT bindings come from `cadquery-ocp`** — imports are `from OCP.X import Y` (not `OCC.Core` as `docs/PLAN.md` says; the plan predates the binding choice). `cadquery` itself is a dev-only dependency used solely to build test fixtures.
-- **Units**: everything upstream is millimetres (STEP convention); `export_mjcf.py` scales to metres (`_MM_TO_M`) for MuJoCo. Tolerances in `contact.Tolerances` are in mm/mm².
+- **Units**: everything upstream is millimetres (STEP convention); the emitters scale to metres (`export_common.MM_TO_M`) at the output boundary. Tolerances in `contact.Tolerances` are in mm/mm².
+- **Emitter semantics differ**: MJCF nests bodies (fixed joint = no joint element, loop joint = `<equality><connect>`); SDF is flat (fixed and loop joints are both explicit `<joint>` elements, root welded to the `world` pseudo-link).
 - **Joint classification is deterministic and conservative** (`joints.py`): rules return `None` rather than guessing, so unmatched part pairs stay unjoined (the CLI reports them on stderr). Rules run most-constraining first: Fixed → Prismatic → Revolute. The fixed/prismatic boundary is whether the contact-plane normals admit a common perpendicular (the slide direction); the bolt-aspect heuristic and shoulder-plane lock keep bolted joints from misclassifying as revolute.
 - **Indices, not references**: `Joint.parent`/`Joint.child` and `PartContact.i`/`j` are integer indices into `AssemblyModel.parts`, carried through the whole pipeline.
 - **Triangulation is shared**: `extract_surfaces` meshes the shape (`BRepMesh_IncrementalMesh`) to estimate cylinder axial extent; the triangulation is cached on the shape and reused by the STL export.

@@ -87,6 +87,7 @@ PartSurfaces { planes: [PlaneFace], cylinders: [CylinderFace] }
   ▼
 KinematicTree { root, parts, joints, loop_joints }
   │  export_mjcf.write_mjcf     — MJCF XML + per-part STL meshes
+  │  export_sdf.write_sdf       — SDF XML, same IR and meshes (--format sdf)
   ▼
 model.xml + meshes/*.stl
 ```
@@ -243,6 +244,30 @@ Joints induce an undirected multigraph over parts. The tree is extracted as foll
 - The root body is welded to the world (no free joint), matching the "grounded mechanism"
   interpretation; a floating base can be added manually.
 
+### 3.7 SDF emission
+
+The SDF emitter consumes the identical `KinematicTree` and shares mesh export, naming,
+unit scaling, and mass computation with the MJCF emitter (factored into
+`export_common.py`), so the two outputs are guaranteed consistent. The structural
+differences are instructive about the two formats:
+
+- **Flat links vs. body tree.** SDF links are siblings inside `<model>`; joints
+  reference parent and child by name. No tree recursion is needed, and the spanning
+  tree's *orientation* matters only for the parent/child labels.
+- **Fixed joints are explicit** (`<joint type="fixed">`), where MJCF expresses them by
+  body nesting with no joint element.
+- **Loops are first-class.** Loop-closure joints are emitted as ordinary `<joint>`
+  elements — SDF permits kinematic graphs, not just trees — whereas MJCF demotes them to
+  `<equality><connect>` constraints. The tree/loop split computed by `graph.py` is thus
+  load-bearing for MJCF and merely cosmetic for SDF.
+- **Grounding.** The root link is welded to the world via an explicit fixed joint with
+  parent `world` (an SDF-blessed pseudo-link), mirroring MJCF's world-attached root.
+- **Frames.** SDF joint poses are resolved relative to the child link frame. Because
+  every emitted link sits at the world origin (meshes are already in world
+  coordinates), world-frame joint coordinates can be written directly.
+- Joint names are `parent__child`: with loops, a child name alone is not unique (the
+  loop child already has a tree joint), but at most one joint exists per part pair.
+
 ## 4. Implementation details
 
 Stack: Python ≥3.10, OCCT 7.8 via the **`OCP`** bindings (shipped as `cadquery-ocp`
@@ -360,6 +385,14 @@ inertials). These tests skip gracefully when MuJoCo is not installed. A manual
 interactive check (passive viewer, dragging the hinge leaf) complements the automated
 suite.
 
+The SDF emitter is validated structurally (no Gazebo runtime assumed): every fixture's
+SDF is parsed back and checked for the format's semantics — flat links with
+visual/collision mesh geometry and positive mass, a single world-anchor joint on the
+root, the bolted fixed joint present as an explicit element with no axis, the slider's
+prismatic axis along X, and the four-bar's loop edge present as a fourth ordinary
+revolute joint with a unique `parent__child` name. The CLI `--format sdf` path is
+exercised end-to-end as well.
+
 ## 6. Discussion and limitations
 
 - **Geometry under-determines intent** (§1). The rules encode *manufacturing
@@ -382,10 +415,12 @@ suite.
 
 ## 7. Status and roadmap
 
-Implemented and tested end-to-end: STEP→MJCF with **revolute**, **prismatic**, and
-**fixed** classification, root selection, spanning-tree/**loop-closure** split
-(exercised through MuJoCo by the four-bar fixture), per-pair diagnostics.
+Implemented and tested end-to-end: STEP→**MJCF and SDF** with **revolute**,
+**prismatic**, and **fixed** classification, root selection,
+spanning-tree/**loop-closure** split (exercised through MuJoCo by the four-bar
+fixture), per-pair diagnostics, and a `--format` CLI switch.
 
-Next, in order: **SDF emitter** off the shared `KinematicTree` IR; projected-polygon
-contact areas; scale-relative tolerances; cylinder-axis consistency guard for the
-prismatic rule; spherical/planar/universal joint rules.
+Next, in order: Gazebo round-trip validation of the SDF output (structural checks
+only today); projected-polygon contact areas; scale-relative tolerances;
+cylinder-axis consistency guard for the prismatic rule; spherical/planar/universal
+joint rules.

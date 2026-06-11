@@ -13,7 +13,7 @@ Early MVP. Currently targets a single end-to-end slice: detect a revolute joint 
 3. Detect surface-pair contacts using broad-phase AABB overlap + narrow-phase coincidence tests.
 4. Pattern-match joints (revolute / prismatic / fixed) from contact features.
 5. Build a kinematic tree, breaking cycles into loop constraints.
-6. Emit MJCF (MuJoCo) — SDF emitter shares the same intermediate representation.
+6. Emit MJCF (MuJoCo) or SDF (Gazebo) — both emitters share the same intermediate representation.
 
 ## Install
 

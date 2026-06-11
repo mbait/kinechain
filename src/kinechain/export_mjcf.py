@@ -17,55 +17,16 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import numpy as np
-from OCP.BRepGProp import BRepGProp
-from OCP.BRepMesh import BRepMesh_IncrementalMesh
-from OCP.GProp import GProp_GProps
-from OCP.StlAPI import StlAPI_Writer
-
+from .export_common import MM_TO_M, export_part_meshes, mass_kg, vec
 from .graph import KinematicTree
 from .io_step import Part
 from .joints import Joint, JointType
 
 
-_MM_TO_M = 1e-3
-_DEFAULT_DENSITY_KG_PER_M3 = 1000.0  # water
-
-
-def _safe_filename(name: str) -> str:
-    return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
-
-
-def _vec(v: np.ndarray, scale: float = 1.0) -> str:
-    return " ".join(f"{x * scale:.6g}" for x in v)
-
-
-def _mass(shape) -> float:
-    props = GProp_GProps()
-    BRepGProp.VolumeProperties_s(shape, props)
-    volume_mm3 = props.Mass()
-    return volume_mm3 * 1e-9 * _DEFAULT_DENSITY_KG_PER_M3
-
-
-def _export_stl(shape, path: Path, deflection_mm: float = 0.5) -> None:
-    BRepMesh_IncrementalMesh(shape, deflection_mm, False, 0.5, True)
-    writer = StlAPI_Writer()
-    writer.ASCIIMode = False  # MuJoCo's STL decoder accepts binary STL only
-    writer.Write(shape, str(path))
-
-
 def write_mjcf(tree: KinematicTree, out_path: Path, *, model_name: str = "kinechain") -> Path:
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    mesh_dir = out_path.parent / "meshes"
-    mesh_dir.mkdir(exist_ok=True)
-
-    # Export each part as STL into meshes/
-    part_keys: list[str] = []
-    for part in tree.parts:
-        key = _safe_filename(part.name)
-        part_keys.append(key)
-        _export_stl(part.shape, mesh_dir / f"{key}.stl")
+    part_keys = export_part_meshes(tree.parts, out_path.parent / "meshes")
 
     # Build the joints-by-child map for tree traversal
     joints_by_child: dict[int, Joint] = {j.child: j for j in tree.joints}
@@ -78,7 +39,7 @@ def write_mjcf(tree: KinematicTree, out_path: Path, *, model_name: str = "kinech
 
     asset = ET.SubElement(mujoco, "asset")
     for key in part_keys:
-        ET.SubElement(asset, "mesh", name=key, file=f"{key}.stl", scale=f"{_MM_TO_M} {_MM_TO_M} {_MM_TO_M}")
+        ET.SubElement(asset, "mesh", name=key, file=f"{key}.stl", scale=f"{MM_TO_M} {MM_TO_M} {MM_TO_M}")
 
     worldbody = ET.SubElement(mujoco, "worldbody")
     _emit_body(worldbody, tree.root, tree.parts, part_keys, joints_by_child, children_of)
@@ -91,7 +52,7 @@ def write_mjcf(tree: KinematicTree, out_path: Path, *, model_name: str = "kinech
                 "connect",
                 body1=part_keys[lj.parent],
                 body2=part_keys[lj.child],
-                anchor=_vec(lj.axis_point, scale=_MM_TO_M),
+                anchor=vec(lj.axis_point, scale=MM_TO_M),
             )
 
     tree_xml = ET.ElementTree(mujoco)
@@ -113,7 +74,7 @@ def _emit_body(
 
     # Inertial: simple mass from volume × default density. MuJoCo's compiler will
     # auto-derive an inertia tensor from the geom if we omit diaginertia/fullinertia.
-    mass = _mass(parts[part_idx].shape)
+    mass = mass_kg(parts[part_idx].shape)
     ET.SubElement(body, "inertial", pos="0 0 0", mass=f"{mass:.6g}", diaginertia=f"{mass * 1e-4:.6g} {mass * 1e-4:.6g} {mass * 1e-4:.6g}")
 
     if part_idx in joints_by_child:
@@ -128,8 +89,8 @@ def _emit_body(
                 "joint",
                 name=f"{key}_joint",
                 type=kind,
-                pos=_vec(joint.axis_point, scale=_MM_TO_M),
-                axis=_vec(joint.axis_dir),
+                pos=vec(joint.axis_point, scale=MM_TO_M),
+                axis=vec(joint.axis_dir),
             )
         # JointType.FIXED: no <joint> element — body is rigidly attached to its parent.
 
