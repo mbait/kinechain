@@ -141,9 +141,11 @@ dataclass; defaults: 1 mm positional, cos 2.5° angular, 0.5 mm radius):
     faces *face each other*: genuine face-to-face contact. Parallel-same-direction
     coincident faces are merely *flush* (e.g. a pin end sitting level with a bracket face)
     and are not contact.
-  - `overlap_area` — an estimate of shared contact area, currently min(area_a, area_b).
-    This over-estimates for laterally offset coplanar faces (the broad phase is per-part,
-    not per-face); the planned refinement is a projected-polygon intersection.
+  - `overlap_area` — the *exact* shared contact area (up to tessellation): both faces'
+    cached triangulations are projected into the first face's plane and intersected
+    triangle-by-triangle with convex (Sutherland–Hodgman) clipping, summing the clipped
+    areas. This correctly returns zero for coplanar faces that do not overlap
+    laterally — a case a min-of-face-areas estimate gets maximally wrong.
 
 Analytic predicates are used exclusively; exact distance queries (`BRepExtrema`) are
 reserved as a fallback verification because they are orders of magnitude slower.
@@ -189,6 +191,11 @@ physically meaningful). Note the fixed/prismatic boundary is precisely the exist
 s: a dovetail or V-rail (normals all perpendicular to the rail axis) slides; a part
 seated in a pocket (normals spanning 3D) is welded. A bolted interface never reaches
 this rule because the fixed rule's fastener branch claims it first.
+
+Consistency guard: every coaxial cylinder pair in the contact must have its axis
+parallel to s. A cylinder contact pins the parts to its axis line, so sliding in any
+other direction would break it; a perpendicular cylinder therefore vetoes the prismatic
+interpretation (the pair falls through, usually to "unjoined").
 
 **REVOLUTE** — matches the first coaxial cylinder pair that is
 
@@ -305,13 +312,26 @@ triangulation on the shape, so the later STL export reuses it for free.
 
 ### 4.4 Tolerance model
 
-All thresholds live in one frozen dataclass (`contact.Tolerances`): positional ε (1 mm),
-angular ε (cos 2.5°), radius ε (0.5 mm), minimum axial overlap (1 mm), minimum plane
-overlap area (1 mm²). Classification-level thresholds (bolt aspect ratio = 1.0
-overlap/diameter; minimum "large plane" area = 50 mm²) are module constants in
-`joints.py`, pending consolidation. All values are absolute (mm) and tuned for
-desktop-scale mechanisms; scale-relative tolerances (fractions of part bounding-box
-diagonal) are the known fix for very small or very large assemblies.
+All dimensional thresholds live in one frozen dataclass (`contact.Tolerances`), consumed
+by both the contact stage and the joint rules: positional ε, angular ε (cos 2.5°),
+radius ε, minimum axial overlap, minimum plane overlap area, and the minimum "large
+plane" area for the fixed/prismatic rules. The only threshold outside it is the
+dimensionless bolt aspect ratio (1.0 overlap/diameter).
+
+Two constructions exist:
+
+- **Absolute defaults** (1 mm positional, 0.5 mm radius, 50 mm² large-plane …), tuned
+  for desktop-scale mechanisms — used when calling library functions directly.
+- **Scale-relative** via `Tolerances.from_diagonal(d)`, where d is the assembly's AABB
+  diagonal: linear thresholds scale as fixed fractions of d (positional/radius
+  2·10⁻³ d, axial overlap 5·10⁻³ d), area thresholds as the square of a fraction
+  ((5·10⁻³ d)² and (5·10⁻² d)²), and the angular tolerance stays fixed (dimensionless).
+  The CLI uses this construction, so the same pipeline handles watch-scale and
+  excavator-scale assemblies; a 1/100-scale hinge that the absolute defaults miss
+  entirely (its 0.4 mm bore overlap falls below the 1 mm minimum) is classified
+  correctly under scale-relative tolerances (`tests/test_scale.py`). One caveat
+  carried by the same test: the meshing deflection passed to surface extraction must
+  scale with the geometry too.
 
 ### 4.5 Complexity
 
@@ -385,6 +405,19 @@ inertials). These tests skip gracefully when MuJoCo is not installed. A manual
 interactive check (passive viewer, dragging the hinge leaf) complements the automated
 suite.
 
+### 5.4 Unit-level tests
+
+Two pieces of machinery are additionally tested below the fixture level. The projected
+overlap area is verified on synthetic square faces (full/half/quarter overlap,
+containment, and the laterally disjoint coplanar case that motivated the exact
+computation). The classification rules are exercised on hand-built contact-feature
+structures with no CAD involved at all — this pins down rule *boundaries* cheaply:
+prismatic acceptance, the cylinder-axis veto (and its interaction with the revolute
+shoulder lock, leaving the pair unjoined), normals-spanning-3D → fixed,
+plane+bolt → fixed, a lone contact plane → unjoined, and sliver planes below the area
+threshold → ignored. The scale-relative tolerance behaviour is tested by shrinking the
+hinge fixture 100× (see §4.4).
+
 The SDF emitter is validated structurally (no Gazebo runtime assumed): every fixture's
 SDF is parsed back and checked for the format's semantics — flat links with
 visual/collision mesh geometry and positive mass, a single world-anchor joint on the
@@ -400,14 +433,9 @@ exercised end-to-end as well.
   clamp), not physics. A press-fit pin of bearing-like proportions will be classified
   revolute; nothing in the geometry distinguishes it. The conservative-default policy
   bounds the damage: ambiguity yields "unjoined + diagnostic", never a wrong weld.
-- **Contact-area estimation is approximate** (min of face areas). Two large coplanar but
-  laterally disjoint faces can spuriously satisfy the fixed rule's area threshold;
-  projected-polygon intersection closes this.
-- **The prismatic rule ignores cylinder evidence.** A coaxial cylinder pair whose axis
-  is not parallel to the slide direction would physically block the slide; the rule does
-  not yet check for this (the bolted case is covered only because the fixed rule claims
-  it first). Cylinder-axis-vs-slide-direction consistency is a cheap planned guard.
-- **Absolute tolerances** assume desktop scale (§4.4).
+- **Contact areas are exact only up to tessellation**, and the projection ignores the
+  (tolerance-bounded) angle between near-parallel faces — both effects are second-order
+  at the default 2.5° angular tolerance.
 - **Limits, friction, damping, actuators** are not inferred; joint *limits* in particular
   would require reasoning about stop features.
 - **Mesh-only inputs (STL)** are out of scope by design; the `surfaces.py` interface is
@@ -418,9 +446,10 @@ exercised end-to-end as well.
 Implemented and tested end-to-end: STEP→**MJCF and SDF** with **revolute**,
 **prismatic**, and **fixed** classification, root selection,
 spanning-tree/**loop-closure** split (exercised through MuJoCo by the four-bar
-fixture), per-pair diagnostics, and a `--format` CLI switch.
+fixture), per-pair diagnostics, a `--format` CLI switch, **exact projected contact
+areas**, **scale-relative tolerances** (used by the CLI), and the **cylinder-axis
+consistency guard** on the prismatic rule.
 
-Next, in order: Gazebo round-trip validation of the SDF output (structural checks
-only today); projected-polygon contact areas; scale-relative tolerances;
-cylinder-axis consistency guard for the prismatic rule; spherical/planar/universal
-joint rules.
+Next: Gazebo round-trip validation of the SDF output (structural checks only today);
+proper inertia tensors from B-Rep volume moments; spherical/planar/universal joint
+rules; joint-limit inference from stop features.

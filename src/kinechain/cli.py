@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from .contact import find_contacts
+from .contact import Tolerances, assembly_diagonal, find_contacts
 from .export_mjcf import write_mjcf
 from .export_sdf import write_sdf
 from .graph import build_tree
@@ -26,8 +26,13 @@ def main(argv: list[str] | None = None) -> int:
     model = load_step(args.step)
     shapes = [p.shape for p in model.parts]
     surfaces = [extract_surfaces(s) for s in shapes]
-    contacts = find_contacts(shapes, surfaces)
-    joints = classify_all(contacts)
+
+    diag = assembly_diagonal(shapes)
+    tol = Tolerances.from_diagonal(diag)
+    print(f"tolerances: pos={tol.pos:.3g} mm (from {diag:.3g} mm assembly diagonal)", file=sys.stderr)
+
+    contacts = find_contacts(shapes, surfaces, tol)
+    joints = classify_all(contacts, tol)
 
     # Diagnostics: contacts that matched no joint rule stay unjoined — make that visible
     # rather than silently dropping them.

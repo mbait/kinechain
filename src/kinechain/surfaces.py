@@ -17,6 +17,7 @@ from OCP.GeomAbs import GeomAbs_SurfaceType
 from OCP.GProp import GProp_GProps
 from OCP.TopAbs import TopAbs_Orientation, TopAbs_ShapeEnum
 from OCP.TopExp import TopExp_Explorer
+from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape
 
 
@@ -28,9 +29,11 @@ class PlaneFace:
     away from the part's material. Two parts in face-to-face contact therefore have
     antiparallel normals.
     """
-    point: np.ndarray   # shape (3,)
-    normal: np.ndarray  # unit vector, shape (3,)
+    point: np.ndarray      # shape (3,)
+    normal: np.ndarray     # unit vector, shape (3,)
     area: float
+    triangles: np.ndarray  # face triangulation, shape (n, 3, 3), world coords —
+                           # used for projected contact-area computation
 
 
 @dataclass(frozen=True)
@@ -59,14 +62,27 @@ def _to_np(p) -> np.ndarray:
     return np.array([p.X(), p.Y(), p.Z()], dtype=float)
 
 
+def _face_triangles(face: TopoDS_Face) -> np.ndarray:
+    """Return the face's cached triangulation as an (n, 3, 3) array in world coords."""
+    location = TopLoc_Location()
+    tri = BRep_Tool.Triangulation_s(face, location)
+    if tri is None:
+        return np.zeros((0, 3, 3))
+    trsf = location.Transformation()
+    nodes = [_to_np(tri.Node(i).Transformed(trsf)) for i in range(1, tri.NbNodes() + 1)]
+    out = []
+    for i in range(1, tri.NbTriangles() + 1):
+        t = tri.Triangle(i)
+        out.append([nodes[t.Value(1) - 1], nodes[t.Value(2) - 1], nodes[t.Value(3) - 1]])
+    return np.array(out) if out else np.zeros((0, 3, 3))
+
+
 def _axial_extent(face: TopoDS_Face, axis_point: np.ndarray, axis_dir: np.ndarray) -> float:
     """Project every triangulated vertex of the face onto the axis and return the spread.
 
     Uses the BRep tool's discretization rather than tessellating fresh: for the MVP it's
     enough to get a robust scalar that distinguishes a short bolt-stub from a long shaft.
     """
-    loc = type(face).TShape  # unused, kept to remind that BRep_Tool.Triangulation takes a TopLoc_Location ref
-    from OCP.TopLoc import TopLoc_Location
     location = TopLoc_Location()
     tri = BRep_Tool.Triangulation_s(face, location)
     if tri is None:
@@ -118,6 +134,7 @@ def extract_surfaces(shape: TopoDS_Shape, *, mesh_deflection: float = 0.5) -> Pa
                     point=_to_np(loc),
                     normal=normal,
                     area=_face_area(face),
+                    triangles=_face_triangles(face),
                 )
             )
         elif stype == GeomAbs_SurfaceType.GeomAbs_Cylinder:

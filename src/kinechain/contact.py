@@ -26,6 +26,23 @@ class Tolerances:
     radius: float = 0.5       # mm — cylinder radius mismatch tolerance
     min_axial_overlap: float = 1.0      # mm — minimum overlap to count cyl-cyl as contact
     min_plane_overlap_area: float = 1.0 # mm² — minimum overlap to count plane-plane as contact
+    min_joint_plane_area: float = 50.0  # mm² — "large" face-to-face contact for joint rules
+
+    @classmethod
+    def from_diagonal(cls, diag: float) -> "Tolerances":
+        """Scale-relative tolerances derived from the assembly AABB diagonal (mm).
+
+        The defaults above assume desktop-scale mechanisms; this constructor makes the
+        same pipeline work on watch- or excavator-scale assemblies. Angular tolerance
+        is dimensionless and stays fixed.
+        """
+        return cls(
+            pos=2e-3 * diag,
+            radius=2e-3 * diag,
+            min_axial_overlap=5e-3 * diag,
+            min_plane_overlap_area=(5e-3 * diag) ** 2,
+            min_joint_plane_area=(5e-2 * diag) ** 2,
+        )
 
 
 @dataclass(frozen=True)
@@ -64,6 +81,14 @@ def _aabb_overlap(a: tuple[np.ndarray, np.ndarray], b: tuple[np.ndarray, np.ndar
     return bool(np.all(a[0] <= b[1]) and np.all(b[0] <= a[1]))
 
 
+def assembly_diagonal(shapes: list[TopoDS_Shape]) -> float:
+    """AABB diagonal of the whole assembly (mm) — the scale input for Tolerances."""
+    boxes = [_aabb(s, slack=0.0) for s in shapes]
+    lo = np.min(np.array([b[0] for b in boxes]), axis=0)
+    hi = np.max(np.array([b[1] for b in boxes]), axis=0)
+    return float(np.linalg.norm(hi - lo))
+
+
 def _axial_overlap(a: CylinderFace, b: CylinderFace) -> float:
     """Length of overlap between the two cylinders measured along their (shared) axis."""
     axis = a.axis_dir
@@ -84,6 +109,79 @@ def _coaxial(a: CylinderFace, b: CylinderFace, tol: Tolerances) -> bool:
     delta = b.axis_point - a.axis_point
     perp = delta - np.dot(delta, a.axis_dir) * a.axis_dir
     return bool(np.linalg.norm(perp) <= tol.pos)
+
+
+def _plane_basis(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """An orthonormal (u, v) basis spanning the plane with the given normal."""
+    helper = np.array([1.0, 0.0, 0.0]) if abs(normal[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u = np.cross(normal, helper)
+    u /= np.linalg.norm(u)
+    v = np.cross(normal, u)
+    return u, v
+
+
+def _cross2(a: np.ndarray, b: np.ndarray) -> float:
+    return float(a[0] * b[1] - a[1] * b[0])
+
+
+def _poly_area(pts: list[np.ndarray]) -> float:
+    """Shoelace area of a 2D polygon (absolute value)."""
+    if len(pts) < 3:
+        return 0.0
+    total = 0.0
+    for i in range(len(pts)):
+        total += _cross2(pts[i], pts[(i + 1) % len(pts)])
+    return abs(total) / 2.0
+
+
+def _clip_to_triangle(subject: list[np.ndarray], clip_tri: list[np.ndarray]) -> list[np.ndarray]:
+    """Sutherland–Hodgman: clip a polygon against a CCW triangle (both convex)."""
+    output = subject
+    for i in range(3):
+        if not output:
+            return []
+        a, b = clip_tri[i], clip_tri[(i + 1) % 3]
+        edge = b - a
+        pts, output = output, []
+        prev = pts[-1]
+        prev_in = _cross2(edge, prev - a) >= 0.0
+        for cur in pts:
+            cur_in = _cross2(edge, cur - a) >= 0.0
+            if cur_in != prev_in:
+                d1 = _cross2(edge, prev - a)
+                d2 = _cross2(edge, cur - a)
+                output.append(prev + (d1 / (d1 - d2)) * (cur - prev))
+            if cur_in:
+                output.append(cur)
+            prev, prev_in = cur, cur_in
+    return output
+
+
+def _projected_overlap_area(a: PlaneFace, b: PlaneFace) -> float:
+    """Exact shared contact area of two (near-)coincident planar faces.
+
+    Both faces' triangulations are projected into a's plane and intersected
+    triangle-by-triangle (convex clipping). Exact up to the tessellation, and
+    correctly returns 0 for coplanar faces that do not overlap laterally.
+    """
+    if a.triangles.size == 0 or b.triangles.size == 0:
+        return 0.0
+    u, v = _plane_basis(a.normal)
+
+    def to2d(tris: np.ndarray) -> np.ndarray:
+        d = tris - a.point
+        return np.stack([d @ u, d @ v], axis=-1)  # (n, 3, 2)
+
+    total = 0.0
+    for ta in to2d(a.triangles):
+        # Orient the clip triangle CCW; skip degenerate slivers.
+        signed = _cross2(ta[1] - ta[0], ta[2] - ta[0])
+        if abs(signed) < 1e-12:
+            continue
+        clip = list(ta) if signed > 0 else [ta[0], ta[2], ta[1]]
+        for tb in to2d(b.triangles):
+            total += _poly_area(_clip_to_triangle(list(tb), clip))
+    return total
 
 
 def _plane_coincident(a: PlaneFace, b: PlaneFace, tol: Tolerances) -> bool:
@@ -121,10 +219,7 @@ def find_contacts(
                 for pb in sj.planes:
                     if not _plane_coincident(pa, pb, tol):
                         continue
-                    # min(area) over-estimates the shared area for laterally offset
-                    # faces (the broad phase is per-part, not per-face); a projected
-                    # polygon intersection is the planned refinement.
-                    overlap_area = min(pa.area, pb.area)
+                    overlap_area = _projected_overlap_area(pa, pb)
                     if overlap_area < tol.min_plane_overlap_area:
                         continue
                     pln_pairs.append(
