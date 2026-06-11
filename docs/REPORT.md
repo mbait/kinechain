@@ -220,6 +220,9 @@ Joints induce an undirected multigraph over parts. The tree is extracted as foll
 - **Loops:** edges not in the BFS spanning tree become `loop_joints`. For a four-bar
   linkage this yields three tree joints plus one loop-closure constraint, matching
   simulator expectations (MJCF `<equality><connect>`; SDF allows explicit loop joints).
+  The resulting MuJoCo model has the physically correct mobility: three hinge DOF
+  minus two constrained translations at the connect point leaves the four-bar's
+  single effective DOF.
 
 ### 3.6 MJCF emission
 
@@ -321,6 +324,18 @@ Asserts: contact detection finds exactly 4 coaxial cylinder pairs and an antipar
 plane pair; exactly one joint, type fixed; base (larger volume) is root; emitted MJCF
 contains *no* joint element and nests the top body inside the base body.
 
+**Four-bar linkage** (`make_fourbar.py`) — loop-closure test. Four bar links (ground,
+crank, coupler, rocker) in three Z-layers with 2 mm air gaps between layers, joined by
+four integral-pin revolute joints with parallel Z axes at the loop corners. The layer
+gaps guarantee *no* planar contact anywhere — each joint is evidenced purely by one
+pin/hole coaxial pair (5 mm engagement vs. 4 mm pin diameter, clearing the bolt-aspect
+guard) — and same-layer links (crank, rocker) are separated in X so the broad phase
+rejects them. Flush pin-tip/boss-top faces additionally regression-test the
+antiparallel filter (they must not register as shoulders). Asserts: exactly four
+revolute joints, all axes ∥ ẑ, every part participating in exactly two joints (the
+loop signature); spanning tree of three joints + one loop joint; ground (largest
+volume) as root; MJCF with three hinge joints and an `<equality><connect>` element.
+
 **V-rail slider** (`make_slider.py`) — prismatic true-positive / fixed false-positive
 guard. An 80 mm rail with a full-length triangular ridge (45° flanks) and a shorter
 40 mm carriage with the matching groove. The contact comprises three distinct
@@ -338,7 +353,8 @@ rail (larger volume) is root; emitted MJCF contains a `slide` joint.
 Every fixture is additionally loaded into MuJoCo (`MjModel.from_xml_path`), asserting
 the compiled model's joint count and joint types (hinge: `njnt == 1`,
 `jnt_type == mjJNT_HINGE`; bolted: `njnt == 0`, `nbody == 3`; slider: `njnt == 1`,
-`jnt_type == mjJNT_SLIDE`). This catches emission
+`jnt_type == mjJNT_SLIDE`; four-bar: `njnt == 3` hinges plus `neq == 1` connect
+constraint). This catches emission
 errors that XML-level assertions miss (bad mesh references, scale errors, malformed
 inertials). These tests skip gracefully when MuJoCo is not installed. A manual
 interactive check (passive viewer, dragging the hinge leaf) complements the automated
@@ -367,9 +383,9 @@ suite.
 ## 7. Status and roadmap
 
 Implemented and tested end-to-end: STEP→MJCF with **revolute**, **prismatic**, and
-**fixed** classification, root selection, spanning-tree/loop-joint split (loop path
-exercised structurally but not yet by a fixture), per-pair diagnostics.
+**fixed** classification, root selection, spanning-tree/**loop-closure** split
+(exercised through MuJoCo by the four-bar fixture), per-pair diagnostics.
 
-Next, in order: **four-bar linkage** fixture to exercise loop closure through MuJoCo;
-**SDF emitter** off the shared `KinematicTree` IR; projected-polygon contact areas;
-scale-relative tolerances; spherical/planar/universal joint rules.
+Next, in order: **SDF emitter** off the shared `KinematicTree` IR; projected-polygon
+contact areas; scale-relative tolerances; cylinder-axis consistency guard for the
+prismatic rule; spherical/planar/universal joint rules.
