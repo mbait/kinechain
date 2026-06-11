@@ -1,14 +1,19 @@
 """Joint classification from contact features.
 
-Rules are applied most-constraining first: FIXED, then REVOLUTE (PRISMATIC pending).
+Rules are applied most-constraining first: FIXED → PRISMATIC → REVOLUTE.
 A rule that doesn't match returns None rather than guessing, so unmatched part pairs
 stay unjoined and are surfaced in diagnostics instead of being silently welded.
 
 FIXED — a large face-to-face planar contact (antiparallel normals) plus either
     (a) at least one bolt-like coaxial cylinder pair (axial overlap shorter than the
         diameter — a stud or bolt stub, not a bearing bore), or
-    (b) a second face-to-face planar contact with a non-parallel normal (corner-style
-        over-constraint).
+    (b) contact-plane normals that span 3D, i.e. no direction perpendicular to all of
+        them exists — every translation is blocked (pocket-style over-constraint).
+
+PRISMATIC — two or more large face-to-face planar contacts with non-parallel normals
+    that all share a common perpendicular direction s (the cross product of the first
+    two distinct normals). Such contacts block both rotations and every translation
+    except along s ⇒ slide along s.
 
 REVOLUTE — a coaxial-cylinder pair with axial overlap of at least one diameter (a
     "long enough" shared bore — not a bolt-stub) and no face-to-face planar contact
@@ -23,7 +28,7 @@ from enum import Enum
 
 import numpy as np
 
-from .contact import CoaxialCylinderPair, PartContact
+from .contact import CoaxialCylinderPair, CoincidentPlanePair, PartContact
 
 
 class JointType(str, Enum):
@@ -44,14 +49,49 @@ class Joint:
 # Heuristic: a "bolt-like" cylinder is one whose axial overlap is shorter than its diameter.
 # Such pairs lean toward FIXED (with a shoulder plane) rather than revolute. Bare numbers used
 # liberally for the MVP — a later refactor can centralize them in a Tolerances dataclass.
-_BOLT_ASPECT_THRESHOLD = 1.0  # overlap / diameter; below this we treat the bore as short
-_MIN_FIXED_PLANE_AREA = 50.0  # mm² — minimum face-to-face contact to count as "large"
-_PARALLEL_COS = 0.999         # cos(2.5°) — same as Tolerances.angle_cos
+_BOLT_ASPECT_THRESHOLD = 1.0    # overlap / diameter; below this we treat the bore as short
+_MIN_PLANE_CONTACT_AREA = 50.0  # mm² — minimum face-to-face contact to count as "large"
+_PARALLEL_COS = 0.999           # cos(2.5°) — same as Tolerances.angle_cos
+_PERP_SIN = 0.044               # sin(2.5°) — |dot| below this counts as perpendicular
 
 
 def _is_bolt_like(cyl: CoaxialCylinderPair) -> bool:
     radius = max(cyl.a.radius, cyl.b.radius)  # the larger radius is the bore
     return cyl.axial_overlap < _BOLT_ASPECT_THRESHOLD * (2 * radius)
+
+
+def _contact_planes(contact: PartContact) -> list[CoincidentPlanePair]:
+    """Face-to-face plane pairs large enough to be load-bearing contact."""
+    return [
+        pp
+        for pp in contact.coincident_planes
+        if pp.antiparallel and pp.overlap_area >= _MIN_PLANE_CONTACT_AREA
+    ]
+
+
+def _distinct_normals(planes: list[CoincidentPlanePair]) -> list[np.ndarray]:
+    """Contact-plane normals deduplicated up to sign — parallel planes constrain alike."""
+    dirs: list[np.ndarray] = []
+    for pp in planes:
+        n = pp.a.normal
+        if not any(abs(float(np.dot(n, d))) > _PARALLEL_COS for d in dirs):
+            dirs.append(n)
+    return dirs
+
+
+def _slide_direction(normals: list[np.ndarray]) -> np.ndarray | None:
+    """Unit direction perpendicular to every contact normal — the single translation
+    the plane contacts leave free — or None when the normals span 3D (over-constrained).
+    Requires at least two distinct normals (one plane leaves a 3-DOF planar pair, not
+    a slide)."""
+    if len(normals) < 2:
+        return None
+    s = np.cross(normals[0], normals[1])
+    s = s / np.linalg.norm(s)
+    for n in normals[2:]:
+        if abs(float(np.dot(n, s))) > _PERP_SIN:
+            return None
+    return s
 
 
 def _plane_locks_axis(contact: PartContact, axis_dir: np.ndarray) -> bool:
@@ -67,20 +107,15 @@ def _plane_locks_axis(contact: PartContact, axis_dir: np.ndarray) -> bool:
 
 
 def _match_fixed(contact: PartContact) -> Joint | None:
-    planes = [
-        pp
-        for pp in contact.coincident_planes
-        if pp.antiparallel and pp.overlap_area >= _MIN_FIXED_PLANE_AREA
-    ]
+    planes = _contact_planes(contact)
     if not planes:
         return None
     has_bolt = any(_is_bolt_like(cyl) for cyl in contact.coaxial_cylinders)
-    has_non_coplanar = any(
-        abs(float(np.dot(p.a.normal, q.a.normal))) < _PARALLEL_COS
-        for k, p in enumerate(planes)
-        for q in planes[k + 1 :]
-    )
-    if not (has_bolt or has_non_coplanar):
+    # Two or more distinct contact normals leave at most one translation free; when
+    # even that one is gone (normals span 3D), the pair is welded by geometry alone.
+    normals = _distinct_normals(planes)
+    over_constrained = len(normals) >= 2 and _slide_direction(normals) is None
+    if not (has_bolt or over_constrained):
         return None
     # Anchor the (motionless) joint frame on the dominant contact plane.
     anchor = max(planes, key=lambda pp: pp.overlap_area)
@@ -90,6 +125,22 @@ def _match_fixed(contact: PartContact) -> Joint | None:
         child=contact.j,
         axis_point=anchor.a.point.copy(),
         axis_dir=anchor.a.normal.copy(),
+    )
+
+
+def _match_prismatic(contact: PartContact) -> Joint | None:
+    planes = _contact_planes(contact)
+    normals = _distinct_normals(planes)
+    s = _slide_direction(normals)
+    if s is None:
+        return None
+    anchor = max(planes, key=lambda pp: pp.overlap_area)
+    return Joint(
+        type=JointType.PRISMATIC,
+        parent=contact.i,
+        child=contact.j,
+        axis_point=anchor.a.point.copy(),
+        axis_dir=s,
     )
 
 
@@ -115,7 +166,7 @@ def classify(contact: PartContact) -> Joint | None:
     Most-constraining rule first. Returns None if no rule matches — caller should
     treat the pair as "unjoined" and surface it in diagnostics.
     """
-    return _match_fixed(contact) or _match_revolute(contact)
+    return _match_fixed(contact) or _match_prismatic(contact) or _match_revolute(contact)
 
 
 def classify_all(contacts: list[PartContact]) -> list[Joint]:

@@ -59,8 +59,8 @@ function from a single edge's feature set to a joint type (or to "no match").
 | Joint | Geometric signature | Counter-signal |
 |---|---|---|
 | Revolute | coaxial cylinder pair with long axial overlap (a bearing bore) | a face-to-face plane whose normal is parallel to the axis (a shoulder), or short overlap (a bolt stub) |
-| Fixed | large face-to-face planar contact + bolt-like cylinder pair, or multiple non-parallel face-to-face planes | — |
-| Prismatic (planned) | two non-parallel face-to-face plane pairs sharing a common direction (the slide axis) | — |
+| Fixed | large face-to-face planar contact + bolt-like cylinder pair, or contact-plane normals spanning 3D (every translation blocked) | — |
+| Prismatic | ≥2 non-parallel face-to-face plane pairs whose normals all share a common perpendicular — the slide axis | a contact normal with a component along the slide axis (→ fixed) |
 
 ## 3. System design
 
@@ -149,9 +149,24 @@ reserved as a fallback verification because they are orders of magnitude slower.
 
 ### 3.4 Joint classification rules
 
-Rules run **most-constraining first** — FIXED, then REVOLUTE (PRISMATIC pending) — and the
-first match wins. Ordering matters: a bolted joint exhibits revolute-like coaxial
-cylinders, so the more-constraining interpretation must get the first claim.
+Rules run **most-constraining first** — FIXED → PRISMATIC → REVOLUTE — and the first
+match wins. Ordering matters: a bolted joint exhibits revolute-like coaxial cylinders,
+so the more-constraining interpretation must get the first claim.
+
+The plane-contact rules share one piece of screw-theory-flavoured reasoning. Each
+face-to-face plane contact blocks translation along its (outward, see §4.2) normal.
+Collect the *distinct* contact normals (deduplicated up to sign — parallel planes
+constrain the same direction):
+
+- **1 distinct normal** — translation blocked along it, leaving 2 in-plane translations
+  + spin about the normal: a *planar pair*, not a joint kinechain emits. It becomes
+  FIXED only with corroborating fastener evidence (below).
+- **≥2 distinct normals** — at most one translation survives: the direction
+  **s = n̂₁ × n̂₂ / ‖n̂₁ × n̂₂‖** perpendicular to all normals, *if* every further normal is
+  also perpendicular to s. Rotations are fully blocked (any rotation would tilt at least
+  one contact plane). One DOF along s ⇒ **prismatic**.
+- **normals spanning 3D** (no common perpendicular) — zero DOF ⇒ **fixed** by geometry
+  alone.
 
 **FIXED** — matches when there is a *large* face-to-face planar contact (antiparallel,
 overlap area ≥ threshold) **and** at least one of:
@@ -159,12 +174,20 @@ overlap area ≥ threshold) **and** at least one of:
 1. a **bolt-like** coaxial cylinder pair — axial overlap < diameter (aspect-ratio
    heuristic: a fastener engages over a short length relative to its diameter, whereas a
    bearing bore is long); or
-2. a second face-to-face planar contact whose normal is **not parallel** to the first —
-   two non-parallel plane contacts over-constrain relative motion (corner/pocket seating).
+2. **over-constraint**: ≥2 distinct contact normals with no common perpendicular
+   direction — every translation is blocked (pocket/corner seating).
 
 The joint frame is anchored on the dominant (largest-overlap) contact plane. The frame is
 nominal — a fixed joint has no motion — but keeping it lets downstream consumers locate
 the interface.
+
+**PRISMATIC** — matches when the contact planes admit exactly one free direction: ≥2
+distinct normals with a common perpendicular s. The joint axis direction is s; the axis
+point is taken from the dominant contact plane (for a slide, only the direction is
+physically meaningful). Note the fixed/prismatic boundary is precisely the existence of
+s: a dovetail or V-rail (normals all perpendicular to the rail axis) slides; a part
+seated in a pocket (normals spanning 3D) is welded. A bolted interface never reaches
+this rule because the fixed rule's fastener branch claims it first.
 
 **REVOLUTE** — matches the first coaxial cylinder pair that is
 
@@ -298,11 +321,24 @@ Asserts: contact detection finds exactly 4 coaxial cylinder pairs and an antipar
 plane pair; exactly one joint, type fixed; base (larger volume) is root; emitted MJCF
 contains *no* joint element and nests the top body inside the base body.
 
+**V-rail slider** (`make_slider.py`) — prismatic true-positive / fixed false-positive
+guard. An 80 mm rail with a full-length triangular ridge (45° flanks) and a shorter
+40 mm carriage with the matching groove. The contact comprises three distinct
+face-to-face plane orientations — the two flanks (normals (0, ±√2⁄2, √2⁄2) on the rail
+side) and the flat seat (normal ±ẑ) — all perpendicular to x̂, so the slide direction
+resolves to the rail axis. No cylinders exist, isolating the plane-only path; the
+carriage is shorter than the rail so no x̂-normal contact blocks the slide. The
+flush (parallel-same-direction) carriage/rail side faces also exercise the
+antiparallel filter. Asserts: no coaxial cylinders; ≥2 face-to-face plane pairs with
+non-parallel normals; exactly one joint, type prismatic, axis parallel to world X;
+rail (larger volume) is root; emitted MJCF contains a `slide` joint.
+
 ### 5.3 Round-trip validation
 
-Both fixtures are additionally loaded into MuJoCo (`MjModel.from_xml_path`), asserting
+Every fixture is additionally loaded into MuJoCo (`MjModel.from_xml_path`), asserting
 the compiled model's joint count and joint types (hinge: `njnt == 1`,
-`jnt_type == mjJNT_HINGE`; bolted: `njnt == 0`, `nbody == 3`). This catches emission
+`jnt_type == mjJNT_HINGE`; bolted: `njnt == 0`, `nbody == 3`; slider: `njnt == 1`,
+`jnt_type == mjJNT_SLIDE`). This catches emission
 errors that XML-level assertions miss (bad mesh references, scale errors, malformed
 inertials). These tests skip gracefully when MuJoCo is not installed. A manual
 interactive check (passive viewer, dragging the hinge leaf) complements the automated
@@ -318,6 +354,10 @@ suite.
 - **Contact-area estimation is approximate** (min of face areas). Two large coplanar but
   laterally disjoint faces can spuriously satisfy the fixed rule's area threshold;
   projected-polygon intersection closes this.
+- **The prismatic rule ignores cylinder evidence.** A coaxial cylinder pair whose axis
+  is not parallel to the slide direction would physically block the slide; the rule does
+  not yet check for this (the bolted case is covered only because the fixed rule claims
+  it first). Cylinder-axis-vs-slide-direction consistency is a cheap planned guard.
 - **Absolute tolerances** assume desktop scale (§4.4).
 - **Limits, friction, damping, actuators** are not inferred; joint *limits* in particular
   would require reasoning about stop features.
@@ -326,11 +366,10 @@ suite.
 
 ## 7. Status and roadmap
 
-Implemented and tested end-to-end: STEP→MJCF with **revolute** and **fixed**
-classification, root selection, spanning-tree/loop-joint split (loop path exercised
-structurally but not yet by a fixture), per-pair diagnostics.
+Implemented and tested end-to-end: STEP→MJCF with **revolute**, **prismatic**, and
+**fixed** classification, root selection, spanning-tree/loop-joint split (loop path
+exercised structurally but not yet by a fixture), per-pair diagnostics.
 
-Next, in order: **prismatic** rule + dovetail-slide fixture (requires a slide-direction
-feature from plane-pair geometry); **four-bar linkage** fixture to exercise loop closure
-through MuJoCo; **SDF emitter** off the shared `KinematicTree` IR; projected-polygon
-contact areas; scale-relative tolerances; spherical/planar/universal joint rules.
+Next, in order: **four-bar linkage** fixture to exercise loop closure through MuJoCo;
+**SDF emitter** off the shared `KinematicTree` IR; projected-polygon contact areas;
+scale-relative tolerances; spherical/planar/universal joint rules.
