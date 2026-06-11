@@ -243,9 +243,13 @@ Joints induce an undirected multigraph over parts. The tree is extracted as foll
 - **Joints:** revolute → `<joint type="hinge">`, prismatic → `type="slide"`, **fixed → no
   joint element at all** — in MJCF a child body with no joint is rigidly welded to its
   parent, which is exactly the fixed-joint semantics.
-- **Inertia:** mass from B-Rep volume × default density (1000 kg/m³), with a placeholder
-  diagonal inertia. (Proper inertia tensors from `VolumeProperties` moments are future
-  work; MuJoCo can also derive inertia from geometry.)
+- **Inertia:** exact, from B-Rep volume integration (`BRepGProp.VolumeProperties` at a
+  default density of 1000 kg/m³): mass, centre of mass, and the full COM-referenced
+  inertia tensor (OCCT's `MatrixOfInertia` is already relative to the centre of mass —
+  no parallel-axis transfer is needed, and adding one produces tensors that MuJoCo
+  rejects as violating the triangle inequality). MJCF gets `pos` = COM and
+  `fullinertia`; SDF gets an inertial `<pose>` at the COM and the six `<inertia>`
+  components. Units: the mm⁵ moments scale by density × 10⁻¹⁵ to kg·m².
 - Loop joints → `<equality><connect>` between the two bodies, anchored at the joint's
   axis point.
 - The root body is welded to the world (no free joint), matching the "grounded mechanism"
@@ -418,6 +422,12 @@ plane+bolt → fixed, a lone contact plane → unjoined, and sliver planes below
 threshold → ignored. The scale-relative tolerance behaviour is tested by shrinking the
 hinge fixture 100× (see §4.4).
 
+Inertial properties are validated against closed-form solutions: an off-center box and
+a cylinder must reproduce the textbook tensors (the off-center case proves the tensor
+is COM-referenced — the placement offset must not leak in), and a MuJoCo round trip
+checks that the compiled model carries the analytic mass and principal moments of the
+hinge pin to within the XML's 6-significant-digit serialization.
+
 The SDF emitter is validated structurally (no Gazebo runtime assumed): every fixture's
 SDF is parsed back and checked for the format's semantics — flat links with
 visual/collision mesh geometry and positive mass, a single world-anchor joint on the
@@ -448,8 +458,9 @@ Implemented and tested end-to-end: STEP→**MJCF and SDF** with **revolute**,
 spanning-tree/**loop-closure** split (exercised through MuJoCo by the four-bar
 fixture), per-pair diagnostics, a `--format` CLI switch, **exact projected contact
 areas**, **scale-relative tolerances** (used by the CLI), and the **cylinder-axis
-consistency guard** on the prismatic rule.
+consistency guard** on the prismatic rule, and **exact inertial properties** (mass,
+COM, full tensor) validated against closed-form solutions.
 
 Next: Gazebo round-trip validation of the SDF output (structural checks only today);
-proper inertia tensors from B-Rep volume moments; spherical/planar/universal joint
-rules; joint-limit inference from stop features.
+spherical/planar/universal joint rules; joint-limit inference from stop features;
+a user-settable density (currently fixed at 1000 kg/m³).

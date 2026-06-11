@@ -17,7 +17,7 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from .export_common import MM_TO_M, export_part_meshes, mass_kg, vec
+from .export_common import MM_TO_M, export_part_meshes, inertial_properties, vec
 from .graph import KinematicTree
 from .io_step import Part
 from .joints import Joint, JointType
@@ -72,10 +72,22 @@ def _emit_body(
     key = part_keys[part_idx]
     body = ET.SubElement(parent_xml, "body", name=key, pos="0 0 0")
 
-    # Inertial: simple mass from volume × default density. MuJoCo's compiler will
-    # auto-derive an inertia tensor from the geom if we omit diaginertia/fullinertia.
-    mass = mass_kg(parts[part_idx].shape)
-    ET.SubElement(body, "inertial", pos="0 0 0", mass=f"{mass:.6g}", diaginertia=f"{mass * 1e-4:.6g} {mass * 1e-4:.6g} {mass * 1e-4:.6g}")
+    # Exact inertial from B-Rep volume integration: COM as the inertial frame origin,
+    # full tensor about the COM (MJCF fullinertia order: ixx iyy izz ixy ixz iyz).
+    mass, com, inertia = inertial_properties(parts[part_idx].shape)
+    ET.SubElement(
+        body,
+        "inertial",
+        pos=vec(com),
+        mass=f"{mass:.6g}",
+        fullinertia=" ".join(
+            f"{x:.6g}"
+            for x in (
+                inertia[0, 0], inertia[1, 1], inertia[2, 2],
+                inertia[0, 1], inertia[0, 2], inertia[1, 2],
+            )
+        ),
+    )
 
     if part_idx in joints_by_child:
         joint = joints_by_child[part_idx]

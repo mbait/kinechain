@@ -23,7 +23,7 @@ from __future__ import annotations
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from .export_common import MM_TO_M, export_part_meshes, mass_kg, vec
+from .export_common import MM_TO_M, export_part_meshes, inertial_properties, vec
 from .graph import KinematicTree
 from .joints import Joint, JointType
 
@@ -64,14 +64,18 @@ def _emit_link(model: ET.Element, shape, key: str) -> None:
     link = ET.SubElement(model, "link", name=key)
     ET.SubElement(link, "pose").text = "0 0 0 0 0 0"
 
-    mass = mass_kg(shape)
+    # Exact inertial from B-Rep volume integration. The inertial <pose> places the
+    # frame at the COM; the tensor is about the COM in that frame's (link-aligned) axes.
+    mass, com, tensor = inertial_properties(shape)
     inertial = ET.SubElement(link, "inertial")
+    ET.SubElement(inertial, "pose").text = f"{vec(com)} 0 0 0"
     ET.SubElement(inertial, "mass").text = f"{mass:.6g}"
     inertia = ET.SubElement(inertial, "inertia")
-    for tag in ("ixx", "iyy", "izz"):
-        ET.SubElement(inertia, tag).text = f"{mass * 1e-4:.6g}"
-    for tag in ("ixy", "ixz", "iyz"):
-        ET.SubElement(inertia, tag).text = "0"
+    for tag, value in (
+        ("ixx", tensor[0, 0]), ("ixy", tensor[0, 1]), ("ixz", tensor[0, 2]),
+        ("iyy", tensor[1, 1]), ("iyz", tensor[1, 2]), ("izz", tensor[2, 2]),
+    ):
+        ET.SubElement(inertia, tag).text = f"{value:.6g}"
 
     for kind in ("visual", "collision"):
         el = ET.SubElement(link, kind, name=f"{key}_{kind}")

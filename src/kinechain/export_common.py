@@ -1,10 +1,12 @@
-"""Helpers shared by the MJCF and SDF emitters: naming, units, mass, mesh export.
+"""Helpers shared by the MJCF and SDF emitters: naming, units, inertia, mesh export.
 
 Conventions:
     * Lengths are in millimetres on the STEP side; both simulators use metres.
       Emitters scale all lengths by MM_TO_M at the output boundary.
-    * Mass comes from B-Rep volume × a default density (proper inertia tensors
-      are future work; both emitters write a placeholder diagonal inertia).
+    * Inertial properties come from exact B-Rep volume integration
+      (`BRepGProp.VolumeProperties`) at a default density: mass, centre of mass,
+      and the full inertia tensor about the COM (parallel-axis transfer from the
+      origin-referenced moment matrix OCCT returns).
 """
 
 from __future__ import annotations
@@ -31,11 +33,24 @@ def vec(v: np.ndarray, scale: float = 1.0) -> str:
     return " ".join(f"{x * scale:.6g}" for x in v)
 
 
-def mass_kg(shape) -> float:
+def inertial_properties(shape) -> tuple[float, np.ndarray, np.ndarray]:
+    """Mass (kg), centre of mass (m), and inertia tensor about the COM (kg·m², 3×3).
+
+    OCCT integrates the B-Rep exactly with unit density; MatrixOfInertia is already
+    referenced to the centre of mass, so no parallel-axis transfer is needed. We
+    apply the default density and the mm→m unit change (lengths enter the inertia
+    twice, so the volume factor 1e-9 picks up an extra 1e-6).
+    """
     props = GProp_GProps()
     BRepGProp.VolumeProperties_s(shape, props)
     volume_mm3 = props.Mass()
-    return volume_mm3 * 1e-9 * DEFAULT_DENSITY_KG_PER_M3
+    c = np.array([props.CentreOfMass().X(), props.CentreOfMass().Y(), props.CentreOfMass().Z()])
+    mat = props.MatrixOfInertia()
+    i_com_mm5 = np.array([[mat.Value(r, col) for col in (1, 2, 3)] for r in (1, 2, 3)])
+
+    mass = volume_mm3 * 1e-9 * DEFAULT_DENSITY_KG_PER_M3
+    inertia = i_com_mm5 * DEFAULT_DENSITY_KG_PER_M3 * 1e-15
+    return mass, c * MM_TO_M, inertia
 
 
 def export_stl(shape, path: Path, deflection_mm: float = 0.5) -> None:
