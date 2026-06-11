@@ -39,6 +39,8 @@ class CoaxialCylinderPair:
 class CoincidentPlanePair:
     a: PlaneFace
     b: PlaneFace
+    antiparallel: bool  # True when the outward normals oppose — i.e. real face-to-face contact
+    overlap_area: float  # contact-area estimate: min of the two face areas (see find_contacts)
 
 
 @dataclass(frozen=True)
@@ -117,8 +119,22 @@ def find_contacts(
             pln_pairs: list[CoincidentPlanePair] = []
             for pa in si.planes:
                 for pb in sj.planes:
-                    if _plane_coincident(pa, pb, tol):
-                        pln_pairs.append(CoincidentPlanePair(a=pa, b=pb))
+                    if not _plane_coincident(pa, pb, tol):
+                        continue
+                    # min(area) over-estimates the shared area for laterally offset
+                    # faces (the broad phase is per-part, not per-face); a projected
+                    # polygon intersection is the planned refinement.
+                    overlap_area = min(pa.area, pb.area)
+                    if overlap_area < tol.min_plane_overlap_area:
+                        continue
+                    pln_pairs.append(
+                        CoincidentPlanePair(
+                            a=pa,
+                            b=pb,
+                            antiparallel=float(np.dot(pa.normal, pb.normal)) < 0.0,
+                            overlap_area=overlap_area,
+                        )
+                    )
             if cyl_pairs or pln_pairs:
                 out.append(PartContact(i=i, j=j, coaxial_cylinders=cyl_pairs, coincident_planes=pln_pairs))
     return out

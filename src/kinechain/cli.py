@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from .contact import find_contacts
@@ -25,6 +26,19 @@ def main(argv: list[str] | None = None) -> int:
     surfaces = [extract_surfaces(s) for s in shapes]
     contacts = find_contacts(shapes, surfaces)
     joints = classify_all(contacts)
+
+    # Diagnostics: contacts that matched no joint rule stay unjoined — make that visible
+    # rather than silently dropping them.
+    matched = {(j.parent, j.child) for j in joints}
+    for c in contacts:
+        if (c.i, c.j) in matched:
+            continue
+        print(
+            f"unmatched: {model.parts[c.i].name} <-> {model.parts[c.j].name} "
+            f"({len(c.coaxial_cylinders)} coaxial cylinder pairs, "
+            f"{len(c.coincident_planes)} coincident plane pairs) — no joint rule matched",
+            file=sys.stderr,
+        )
 
     root_idx = None
     if args.root is not None:

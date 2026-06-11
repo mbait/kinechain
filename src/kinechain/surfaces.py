@@ -15,14 +15,19 @@ from OCP.BRepAdaptor import BRepAdaptor_Surface
 from OCP.BRepGProp import BRepGProp
 from OCP.GeomAbs import GeomAbs_SurfaceType
 from OCP.GProp import GProp_GProps
-from OCP.TopAbs import TopAbs_ShapeEnum
+from OCP.TopAbs import TopAbs_Orientation, TopAbs_ShapeEnum
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopoDS import TopoDS, TopoDS_Face, TopoDS_Shape
 
 
 @dataclass(frozen=True)
 class PlaneFace:
-    """A planar face: oriented by its outward normal, located by any point on it."""
+    """A planar face: oriented by its outward normal, located by any point on it.
+
+    The normal accounts for the face's topological orientation, so it always points
+    away from the part's material. Two parts in face-to-face contact therefore have
+    antiparallel normals.
+    """
     point: np.ndarray   # shape (3,)
     normal: np.ndarray  # unit vector, shape (3,)
     area: float
@@ -103,10 +108,15 @@ def extract_surfaces(shape: TopoDS_Shape, *, mesh_deflection: float = 0.5) -> Pa
             pln = adaptor.Plane()
             loc = pln.Location()
             ax = pln.Axis().Direction()
+            normal = _to_np(ax)
+            # The geometric surface normal ignores topology; a REVERSED face has its
+            # material on the surface-normal side, so flip to get the outward normal.
+            if face.Orientation() == TopAbs_Orientation.TopAbs_REVERSED:
+                normal = -normal
             planes.append(
                 PlaneFace(
                     point=_to_np(loc),
-                    normal=_to_np(ax),
+                    normal=normal,
                     area=_face_area(face),
                 )
             )
